@@ -1,0 +1,110 @@
+from qgis.core import QgsProcessingParameterRasterLayer
+from qgis.core import QgsProcessingParameterNumber
+from qgis.core import QgsProcessingParameterPoint
+from qgis.core import QgsProcessingParameterRasterDestination
+from qgis.core import QgsProcessingParameterVectorLayer
+from qgis.core import QgsRasterLayer
+from qgis.analysis import QgsRasterCalculatorEntry
+from qgis.core import QgsRectangle
+import processing
+
+
+class Asd(QgsProcessingAlgorithm):
+
+    def initAlgorithm(self, config=None):
+        self.addParameter(QgsProcessingParameterRasterLayer('dem', 'DEM', defaultValue=None))
+        self.addParameter(QgsProcessingParameterVectorLayer('windrder', 'Windräder Punktdaten', types=[QgsProcessing.TypeVectorPoint], defaultValue=None))
+        self.addParameter(QgsProcessingParameterNumber('hhe_der_anlage_m_ber_dem_boden', 'Höhe der Anlage [m über dem Boden]', type=QgsProcessingParameterNumber.Double, minValue=0, defaultValue=150))
+        self.addParameter(QgsProcessingParameterNumber('hhe_der_person_m_ber_dem_boden', 'Höhe der Person [m über dem Boden]', type=QgsProcessingParameterNumber.Double, minValue=0, defaultValue=1.5))
+        self.addParameter(QgsProcessingParameterNumber('maximaler_suchradius_m', 'Maximaler Suchradius [m]', type=QgsProcessingParameterNumber.Double, minValue=0, defaultValue=10))
+        self.addParameter(QgsProcessingParameterRasterDestination('Output', 'output', createByDefault=True, defaultValue=None))
+        self.addParameter(QgsProcessingParameterRasterDestination('raster_calculator_out', 'raster_calculator_out', createByDefault=True, defaultValue=None))
+
+    def processAlgorithm(self, parameters, context, model_feedback):
+        feedback = QgsProcessingMultiStepFeedback(7, model_feedback)
+        results = {}
+        outputs = {}
+
+        # Get the input point layer
+        point_layer = self.parameterAsVectorLayer(parameters, 'windrder', context)
+        if not point_layer:
+            raise QgsProcessingException('Point layer not found')
+
+        # Iterate through each feature in the point layer
+        for feature in point_layer.getFeatures():
+            point = feature.geometry().asPoint()
+
+            # Perform viewshed analysis for each point
+            alg_params = {
+                '-b': True,
+                '-c': False,
+                '-e': False,
+                '-r': False,
+                'GRASS_RASTER_FORMAT_META': '',
+                'GRASS_RASTER_FORMAT_OPT': '',
+                'GRASS_REGION_CELLSIZE_PARAMETER': 0,
+                'GRASS_REGION_PARAMETER': None,
+                'coordinates': f"{point.x()}, {point.y()}",
+                'input': parameters['dem'],
+                'max_distance': parameters['maximaler_suchradius_m'],
+                'memory': 1000,
+                'observer_elevation': parameters['hhe_der_anlage_m_ber_dem_boden'],
+                'refraction_coeff': 0.24286,
+                'target_elevation': parameters['hhe_der_person_m_ber_dem_boden'],
+                'output': QgsProcessing.TEMPORARY_OUTPUT
+            }
+            result = processing.run('grass7:r.viewshed', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
+
+            # Accumulate the resulting raster
+            if 'output' in result:
+                outputs[feature.id()] = result['output']
+
+
+        # -- my failed approach --
+
+        expr = ''
+        rasters = []
+        for i, path in enumerate(outputs.values()):
+            inputrasterfile = QgsRasterLayer(path, f'raster{i}')
+            rasters.append(inputrasterfile)
+
+            expr = expr + '"{}@1"+'.format(f'raster{i}')
+        expr = expr.rstrip('+')
+
+        extents = [layer.extent() for layer in rasters]
+        # Get the combined extent of all layers
+        combined_extent = QgsRectangle()
+        for extent in extents:
+            combined_extent.combineExtentWith(extent)
+        print(expr)
+
+        alg_params = {
+            'CELLSIZE': 0,
+            'CRS': None,
+            'EXPRESSION': expr,
+            'EXTENT': combined_extent,
+            'LAYERS': rasters,
+            'OUTPUT': parameters['raster_calculator_out']
+        }
+        print(alg_params)
+
+        outputs['raster_calculator'] = processing.run('qgis:rastercalculator', alg_params)
+        results['raster_calculator_out'] = outputs['raster_calculator']['OUTPUT']
+
+
+        return results
+
+    def name(self):
+        return 'asd'
+
+    def displayName(self):
+        return 'asd'
+
+    def group(self):
+        return ''
+
+    def groupId(self):
+        return ''
+
+    def createInstance(self):
+        return Asd()
